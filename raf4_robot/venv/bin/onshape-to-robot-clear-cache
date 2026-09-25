@@ -1,0 +1,8 @@
+#!/home/rafabacano/raf4_robot/venv/bin/python3
+# -*- coding: utf-8 -*-
+import re
+import sys
+from onshape_to_robot import clear_cache
+if __name__ == '__main__':
+    sys.argv[0] = re.sub(r'(-script\.pyw|\.exe)?$', '', sys.argv[0])
+    sys.exit(clear_cache.main())

@@ -4,3 +4,5 @@ log/
 *.pyc
 __pycache__/
 .vscode/
+raf4_robot/assets/
+raf4_robot/config.json
