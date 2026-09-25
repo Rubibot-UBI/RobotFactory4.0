@@ -1,11 +1,37 @@
 <?xml version="1.0"?>
 <robot name="raf4" xmlns:xacro="http://www.ros.org/wiki/xacro">
 
+  <!-- ===================== Posição das rodas =====================
+       Um bloco de propriedades POR RODA, em vez de espelhar um valor único,
+       para o caso de a distância não ser perfeitamente simétrica.
+       Converte sempre de mm (CAD) para metros (ROS): divide por 1000.
+
+       Substitui estes valores pelos que mediste no CAD para CADA roda. -->
+
+  <!-- Roda DIREITA -->
+  <xacro:property name="right_wheel_x" value="-0.08316"/>  <!-- frente/trás -->
+  <xacro:property name="right_wheel_y" value="-0.00021"/>  <!-- lateral (negativo = direita) -->
+  <xacro:property name="right_wheel_z" value="-0.00720"/>  <!-- altura -->
+
+  <!-- Roda ESQUERDA (mede-a separadamente, não assumas que é igual à direita!) -->
+  <xacro:property name="left_wheel_x" value="0.08279"/>
+  <xacro:property name="left_wheel_y" value="-0.00030"/>
+  <xacro:property name="left_wheel_z" value="-0.00725"/>
+
+  <!-- Raio e largura da roda: mede-os também no CAD (não são os do Measure
+       que mandaste, são as dimensões da própria roda) -->
+  <xacro:property name="wheel_radius" value="0.0235"/>
+  <xacro:property name="wheel_width" value="0.013"/>
+  <xacro:property name="wheel_mass" value="0.05"/>
+
   <link name="base_link">
     <visual>
       <geometry>
         <mesh filename="package://raf4_description/meshes/raf4.stl" scale="0.001 0.001 0.001"/>
       </geometry>
+      <material name="chassis_color">
+        <color rgba="0.2 0.2 0.2 1"/>
+      </material>
     </visual>
     <collision>
       <geometry>
@@ -18,18 +44,60 @@
     </inertial>
   </link>
 
+  <!-- ===================== Macro da roda =====================
+       A macro recebe agora x/y/z diretamente (em vez de "reflect"),
+       para permitir valores diferentes por roda. -->
+  <xacro:macro name="wheel" params="prefix x y z">
+    <link name="${prefix}_wheel_link">
+      <visual>
+        <geometry>
+          <mesh filename="package://raf4_description/meshes/roda.stl" scale="0.001 0.001 0.001"/>
+        </geometry>
+        <material name="wheel_color">
+          <color rgba="0.05 0.05 0.05 1"/>   <!-- quase preto, tipo borracha -->
+        </material>
+      </visual>
+      <collision>
+        <!-- Cilindro simples: mais leve/estável para a física do Gazebo
+             do que usar a malha completa como collision -->
+        <origin xyz="0 0 0" rpy="0 1.5708 0"/>
+        <geometry>
+          <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+        </geometry>
+      </collision>
+      <inertial>
+        <mass value="${wheel_mass}"/>
+        <inertia ixx="0.0001" ixy="0.0" ixz="0.0" iyy="0.0001" iyz="0.0" izz="0.0001"/>
+      </inertial>
+    </link>
+
+    <joint name="${prefix}_wheel_joint" type="continuous">
+      <parent link="base_link"/>
+      <child link="${prefix}_wheel_link"/>
+      <origin xyz="${x} ${y} ${z}" rpy="0 0 0"/>
+      <!-- Eixo de rotação = lateral (Y). Se a roda rodar "torta" no Gazebo,
+           é aqui que tens de mudar. -->
+      <axis xyz="1 0 0"/>
+    </joint>
+
+    <gazebo reference="${prefix}_wheel_link">
+      <mu1>1.0</mu1>
+      <mu2>1.0</mu2>
+    </gazebo>
+  </xacro:macro>
+
+  <xacro:wheel prefix="right" x="${right_wheel_x}" y="${right_wheel_y}" z="${right_wheel_z}"/>
+  <xacro:wheel prefix="left"  x="${left_wheel_x}"  y="${left_wheel_y}"  z="${left_wheel_z}"/>
+
   <!-- Link do IMU (sem geometria visual, é só um referencial) -->
   <link name="imu_link"/>
 
-  <!-- Junta fixa que posiciona o IMU no chassis -->
   <joint name="imu_joint" type="fixed">
     <parent link="base_link"/>
     <child link="imu_link"/>
-    <!-- ajusta x y z conforme a posição real onde o BNO055 vai ficar montado -->
     <origin xyz="0 0 0.05" rpy="0 0 0"/>
   </joint>
 
-  <!-- Plugin do sensor IMU para o Gazebo -->
   <gazebo reference="imu_link">
     <sensor name="imu_sensor" type="imu">
       <always_on>true</always_on>

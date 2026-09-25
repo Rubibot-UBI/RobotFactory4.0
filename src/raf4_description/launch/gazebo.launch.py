@@ -4,12 +4,13 @@ from launch import LaunchDescription
 from launch.actions import ExecuteProcess, SetEnvironmentVariable
 from launch_ros.actions import Node
 from launch.substitutions import Command
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
     pkg_share = get_package_share_directory('raf4_description')
     xacro_file = os.path.join(pkg_share, 'urdf', 'raf4.urdf.xacro')
-    robot_description = Command(['xacro ', xacro_file])
+    robot_description = ParameterValue(Command(['xacro ', xacro_file]), value_type=str)
 
     # aponta o Gazebo para a pasta 'share' (o parente de raf4_description)
     resource_path = os.path.dirname(pkg_share)
