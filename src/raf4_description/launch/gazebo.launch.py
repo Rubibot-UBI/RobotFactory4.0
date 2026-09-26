@@ -53,10 +53,29 @@ def generate_launch_description():
         output='screen'
     )
 
+    imu_filter = Node(
+        package='imu_filter_madgwick',
+        executable='imu_filter_madgwick_node',
+        name='imu_filter',
+        parameters=[{
+            'use_mag': True,
+            'publish_tf': False,
+            'world_frame': 'enu',
+            'fixed_frame': 'odom',
+        }],
+        remappings=[
+            ('imu/data_raw', 'imu/data_raw'),
+            ('imu/mag', 'imu/mag'),
+            ('imu/data', 'imu/data'),
+        ],
+        output='screen'
+    )
+
     return LaunchDescription([
         set_env,
         gazebo,
         robot_state_publisher,
         spawn_entity,
-        bridge
+        bridge,
+        imu_filter
     ])

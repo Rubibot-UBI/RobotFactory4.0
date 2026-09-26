@@ -1,12 +1,7 @@
 <?xml version="1.0"?>
 <robot name="raf4" xmlns:xacro="http://www.ros.org/wiki/xacro">
 
-  <!-- ===================== Posição das rodas =====================
-       Um bloco de propriedades POR RODA, em vez de espelhar um valor único,
-       para o caso de a distância não ser perfeitamente simétrica.
-       Converte sempre de mm (CAD) para metros (ROS): divide por 1000.
-
-       Substitui estes valores pelos que mediste no CAD para CADA roda. -->
+  <!-- ===================== Posição das rodas ===================== -->
 
   <!-- Roda DIREITA -->
   <xacro:property name="right_wheel_x" value="-0.08316"/>  <!-- frente/trás -->
@@ -114,6 +109,19 @@
           <z><noise type="gaussian"><mean>0.0</mean><stddev>0.017</stddev></noise></z>
         </linear_acceleration>
       </imu>
+    </sensor>
+
+    <!-- Magnetómetro: junto com o imu_sensor acima, dá os 9 eixos do BNO055
+         (acelerómetro + giroscópio + magnetómetro) -->
+    <sensor name="mag_sensor" type="magnetometer">
+      <always_on>true</always_on>
+      <update_rate>100</update_rate>
+      <topic>imu/mag</topic>
+      <magnetometer>
+        <x><noise type="gaussian"><mean>0.0</mean><stddev>0.0000008</stddev></noise></x>
+        <y><noise type="gaussian"><mean>0.0</mean><stddev>0.0000008</stddev></noise></y>
+        <z><noise type="gaussian"><mean>0.0</mean><stddev>0.0000008</stddev></noise></z>
+      </magnetometer>
     </sensor>
   </gazebo>
 

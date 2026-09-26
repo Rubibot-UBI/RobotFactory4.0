@@ -1,7 +1,13 @@
-- ros_topic_name: "imu/data"
+- ros_topic_name: "imu/data_raw"
   gz_topic_name: "imu/data"
   ros_type_name: "sensor_msgs/msg/Imu"
   gz_type_name: "gz.msgs.IMU"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "imu/mag"
+  gz_topic_name: "imu/mag"
+  ros_type_name: "sensor_msgs/msg/MagneticField"
+  gz_type_name: "gz.msgs.Magnetometer"
   direction: GZ_TO_ROS
 
 - ros_topic_name: "cmd_vel"

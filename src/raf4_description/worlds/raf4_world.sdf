@@ -11,8 +11,13 @@
     <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"></plugin>
     <!-- ESTE é o plugin que faltava para o sensor IMU produzir dados -->
     <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"></plugin>
+    <!-- Plugin do magnetómetro: sem isto o sensor "magnetometer" não produz dados -->
+    <plugin filename="gz-sim-magnetometer-system" name="gz::sim::systems::Magnetometer"></plugin>
 
     <gravity>0 0 -9.8</gravity>
+    <!-- Campo magnético terrestre de referência (Tesla), valor típico usado
+         em simulações -->
+    <magnetic_field>6e-06 2.3e-05 -4.2e-05</magnetic_field>
 
     <light type="directional" name="sun">
       <cast_shadows>true</cast_shadows>
