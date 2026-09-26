@@ -11,12 +11,12 @@
   <!-- Roda DIREITA -->
   <xacro:property name="right_wheel_x" value="-0.08316"/>  <!-- frente/trás -->
   <xacro:property name="right_wheel_y" value="-0.00021"/>  <!-- lateral (negativo = direita) -->
-  <xacro:property name="right_wheel_z" value="-0.00720"/>  <!-- altura -->
+  <xacro:property name="right_wheel_z" value="0.00720"/>  <!-- altura (subida 3mm face ao valor original -0.00720) -->
 
   <!-- Roda ESQUERDA (mede-a separadamente, não assumas que é igual à direita!) -->
   <xacro:property name="left_wheel_x" value="0.08279"/>
   <xacro:property name="left_wheel_y" value="-0.00030"/>
-  <xacro:property name="left_wheel_z" value="-0.00725"/>
+  <xacro:property name="left_wheel_z" value="0.00720"/>  <!-- altura (subida 3mm face ao valor original -0.00725) -->
 
   <!-- Raio e largura da roda: mede-os também no CAD (não são os do Measure
        que mandaste, são as dimensões da própria roda) -->
@@ -44,12 +44,11 @@
     </inertial>
   </link>
 
-  <!-- ===================== Macro da roda =====================
-       A macro recebe agora x/y/z diretamente (em vez de "reflect"),
-       para permitir valores diferentes por roda. -->
-  <xacro:macro name="wheel" params="prefix x y z">
+  <!-- ===================== Macro da roda ===================== -->
+  <xacro:macro name="wheel" params="prefix x y z yaw">
     <link name="${prefix}_wheel_link">
       <visual>
+        <origin xyz="0 0 0" rpy="0 0 ${yaw}"/>
         <geometry>
           <mesh filename="package://raf4_description/meshes/roda.stl" scale="0.001 0.001 0.001"/>
         </geometry>
@@ -86,8 +85,8 @@
     </gazebo>
   </xacro:macro>
 
-  <xacro:wheel prefix="right" x="${right_wheel_x}" y="${right_wheel_y}" z="${right_wheel_z}"/>
-  <xacro:wheel prefix="left"  x="${left_wheel_x}"  y="${left_wheel_y}"  z="${left_wheel_z}"/>
+  <xacro:wheel prefix="right" x="${right_wheel_x}" y="${right_wheel_y}" z="${right_wheel_z}" yaw="-1.5708"/>
+  <xacro:wheel prefix="left"  x="${left_wheel_x}"  y="${left_wheel_y}"  z="${left_wheel_z}"  yaw="1.5708"/>
 
   <!-- Link do IMU (sem geometria visual, é só um referencial) -->
   <link name="imu_link"/>
