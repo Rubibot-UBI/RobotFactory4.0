@@ -25,9 +25,11 @@ def generate_launch_description():
         executable='robot_state_publisher',
         parameters=[{'robot_description': robot_description}]
     )
+    
+    world_file = os.path.join(pkg_share, 'worlds', 'raf4_world.sdf')
 
     gazebo = ExecuteProcess(
-        cmd=['gz', 'sim', '-r', 'empty.sdf'],
+        cmd=['gz', 'sim', '-r', world_file],
         output='screen'
     )
 
