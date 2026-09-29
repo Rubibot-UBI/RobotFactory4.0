@@ -30,7 +30,6 @@ except ImportError:      # só os gráficos precisam de numpy
 
 import rclpy
 from rclpy.node import Node
-from rclpy.parameter import Parameter
 from rclpy.qos import qos_profile_sensor_data
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import Imu, MagneticField, JointState
@@ -112,7 +111,7 @@ CONTAGENS_POR_VOLTA = PPR_BASE * REDUCAO_ENGRENAGEM * (4 if ENCODER_QUAD_X4 else
 # Têm de bater certo com o raf4.urdf.xacro (wheel_radius, wheel_separation
 # do plugin DiffDrive) -- se mudares lá, muda aqui também.
 RAIO_RODA = 0.0235       # m
-DISTANCIA_ENTRE_RODAS = 0.16595  # m (= left_wheel_y - right_wheel_y no xacro)
+DISTANCIA_ENTRE_RODAS = 0.166  # m
 
 
 class MoverELerImuNode(Node):
@@ -123,18 +122,13 @@ class MoverELerImuNode(Node):
     """
 
     def __init__(self):
-        # use_sim_time: todos os tempos (duração do movimento, dt do IMU)
-        # passam a ser tempo de SIMULAÇÃO, coerentes entre si mesmo com RTF<1.
-        # Precisa do /clock bridgeado (já está no bridge.yaml).
-        super().__init__(
-            'mover_e_ler_imu_gui',
-            parameter_overrides=[Parameter('use_sim_time', Parameter.Type.BOOL, True)])
+        super().__init__('mover_e_ler_imu_gui')
 
         self._lock = threading.Lock()
         self.vel_linear = 0.0
         self.vel_angular = 0.0
         self._a_andar = False
-        self._parar_em = None  # tempo de simulação (s); None = contínuo
+        self._parar_em = None  # timestamp (time.time()); None = contínuo
 
         self.cmd_pub = self.create_publisher(Twist, 'cmd_vel', 10)
 
@@ -194,9 +188,12 @@ class MoverELerImuNode(Node):
         # x, y, theta (rad) -- pose estimada só com os pulsos dos encoders,
         # tal como o firmware real do robô faria
         self.enc_pose = [0.0, 0.0, 0.0]
-        self._enc_inicializado = False
         self.enc_ticks_esq = 0   # contagem acumulada (inteiro, como um
         self.enc_ticks_dir = 0   # contador de hardware real)
+        self._angulo_anterior_esq = None  # último ângulo contínuo (rad) lido
+        self._angulo_anterior_dir = None  # do joint_states, p/ calcular delta
+        self._t_joint = 0.0            # último joint_states processado (relógio real)
+        self._idx_joint = None         # (índice roda esq., índice roda dir.) em cache
 
         # Um único timer trata de publicar o cmd_vel repetidamente (a
         # bridge/plugin espera receção contínua) e de verificar se a
@@ -305,22 +302,33 @@ class MoverELerImuNode(Node):
         """Simula os pulsos reais do encoder Hall dos motores N20 e
         recalcula a odometria a partir deles, exatamente como o firmware
         de um robô real faria (contar pulsos -> distância -> pose)."""
-        try:
-            i_esq = msg.name.index('left_wheel_joint')
-            i_dir = msg.name.index('right_wheel_joint')
-        except ValueError:
-            return  # mensagem ainda não tem os nomes esperados
+        # O JointStatePublisher do Gazebo publica a CADA passo da física
+        # (1 ms -> ~1000 Hz). A quantização em ticks parte do ângulo absoluto,
+        # por isso 100 Hz dão o mesmo resultado; o resto é só disputa do GIL
+        # e do lock com a thread da GUI (=> os travões dos gráficos).
+        agora = time.monotonic()
+        if agora - self._t_joint < 0.01:
+            return
+        self._t_joint = agora
+        if self._idx_joint is None:
+            try:
+                self._idx_joint = (msg.name.index('left_wheel_joint'),
+                                   msg.name.index('right_wheel_joint'))
+            except ValueError:
+                return  # mensagem ainda não tem os nomes esperados
+        i_esq, i_dir = self._idx_joint
         ang_esq = msg.position[i_esq]  # rad, ângulo contínuo "verdadeiro"
         ang_dir = msg.position[i_dir]
 
         with self._lock:
-            if self._enc_inicializado is False:
+            if self._angulo_anterior_esq is None:
                 # primeira mensagem: só inicializa, não há delta para integrar
+                self._angulo_anterior_esq = ang_esq
+                self._angulo_anterior_dir = ang_dir
                 # sem isto, se a roda já estiver rodada (GUI aberta depois do
                 # robô ter andado), o 1.º delta seria enorme -> "salto" na pose
                 self.enc_ticks_esq = round(ang_esq / (2 * math.pi) * CONTAGENS_POR_VOLTA)
                 self.enc_ticks_dir = round(ang_dir / (2 * math.pi) * CONTAGENS_POR_VOLTA)
-                self._enc_inicializado = True
                 return
 
             # ---- 1) Quantização: ângulo contínuo -> nº de pulsos (inteiro) ----
@@ -332,6 +340,9 @@ class MoverELerImuNode(Node):
             delta_ticks_dir = ticks_dir_novo - self.enc_ticks_dir
             self.enc_ticks_esq = ticks_esq_novo
             self.enc_ticks_dir = ticks_dir_novo
+
+            self._angulo_anterior_esq = ang_esq
+            self._angulo_anterior_dir = ang_dir
 
             if delta_ticks_esq == 0 and delta_ticks_dir == 0:
                 return  # roda não rodou o suficiente para um novo pulso
@@ -406,10 +417,6 @@ class MoverELerImuNode(Node):
                     self.odom_pos, self.odom_yaw_deg,
                     tuple(self.enc_pose), self.enc_ticks_esq, self.enc_ticks_dir)
 
-    def _agora(self):
-        """Tempo (s) do relógio do nó = tempo de simulação (use_sim_time)."""
-        return self.get_clock().now().nanoseconds * 1e-9
-
     def esta_a_andar(self):
         with self._lock:
             return self._a_andar
@@ -422,7 +429,7 @@ class MoverELerImuNode(Node):
             parar_em = self._parar_em
 
         # duração pedida já terminou -> pára sozinho
-        if a_andar and parar_em is not None and self._agora() >= parar_em:
+        if a_andar and parar_em is not None and time.time() >= parar_em:
             a_andar = False
             with self._lock:
                 self._a_andar = False
@@ -439,7 +446,7 @@ class MoverELerImuNode(Node):
             self.vel_linear = vel_linear
             self.vel_angular = vel_angular
             self._a_andar = True
-            self._parar_em = (self._agora() + duracao) if duracao > 0 else None
+            self._parar_em = (time.time() + duracao) if duracao > 0 else None
 
     def parar(self):
         with self._lock:
@@ -453,10 +460,8 @@ class JanelaGraficos(tk.Toplevel):
     """Janela com 3 gráficos EM TEMPO REAL: aceleração, velocidade, posição.
 
     IMU (dead-reckoning) a cheio; odometria do Gazebo a tracejado verde.
-    Comparação em normas (|v| e distância): robusta a diferenças de yaw
-    entre o referencial do IMU (Madgwick + magnetómetro, ENU) e o do "odom"
-    (o robô nasce virado para +X = Este, por isso devem coincidir a menos
-    do erro do magnetómetro/bias simulado).
+    Comparação em normas (|v| e distância) porque o referencial do IMU
+    (Madgwick + magnetómetro, ENU) não coincide com o do "odom".
 
     Eficiência:
       * o eixo X é "tempo relativo a agora" (-janela..0), logo os eixos não
@@ -483,6 +488,7 @@ class JanelaGraficos(tk.Toplevel):
         self._versao = -1
         self._janela_ant = None
         self._ylim_t = {}             # última alteração de cada eixo Y
+        self._t_xlim_tudo = 0.0       # último redesenho do eixo X no modo "tudo"
 
         import matplotlib
         from matplotlib.figure import Figure
@@ -572,23 +578,39 @@ class JanelaGraficos(tk.Toplevel):
         self.destroy()
 
     # ---------- eixo Y com histerese ----------
+    @staticmethod
+    def _redondo(x):
+        """Arredonda x>0 para cima a 1, 2 ou 5 x 10^k."""
+        if x <= 0:
+            return 0.0
+        e = 10.0 ** math.floor(math.log10(x))
+        f = x / e
+        for k in (1, 2, 5, 10):
+            if f <= k:
+                return k * e
+        return 10 * e
+
     def _ajustar_y(self, ax, arrays, min_span=0.05):
-        """True se mudou os limites (=> precisa de redesenho completo)."""
+        """True se mudou os limites (=> precisa de redesenho completo, ~60 ms).
+
+        Os limites só saltam para valores redondos (1-2-5), logo a expansão
+        é rara mesmo com deriva a crescer; o encolhimento só acontece se o
+        eixo ficar >4x maior do que o necessário, e no máx. 1x / 5 s.
+        """
         lo = hi = 0.0
         for a in arrays:
             if len(a):
                 lo = min(lo, float(a.min())); hi = max(hi, float(a.max()))
-        span = max(hi - lo, min_span)
-        m = span * 0.12
-        novo = (lo - m, lo + span + m)
         atual = ax.get_ylim()
         agora = time.time()
-        sai = novo[0] < atual[0] or novo[1] > atual[1]
-        sobra = (atual[1] - atual[0]) > 3.0 * (novo[1] - novo[0]) and \
-            agora - self._ylim_t.get(ax, 0.0) > 2.0
+        meio = min_span / 2.0
+        novo = (-self._redondo(max(-lo * 1.15, meio)),
+                self._redondo(max(hi * 1.15, meio)))
+        sai = lo < atual[0] or hi > atual[1]
+        sobra = (atual[1] - atual[0]) > 4.0 * (novo[1] - novo[0]) and \
+            agora - self._ylim_t.get(ax, 0.0) > 5.0
         if sai or sobra:
-            pad = span * 0.25 if sai else span * 0.12   # folga extra ao expandir
-            ax.set_ylim(lo - pad, lo + span + pad)
+            ax.set_ylim(*novo)
             self._ylim_t[ax] = agora
             return True
         return False
@@ -610,6 +632,8 @@ class JanelaGraficos(tk.Toplevel):
             self._janela_ant = janela
             self._desenhar(janela, mudou_janela)
         gasto = (time.perf_counter() - t_ini) * 1000.0
+        if gasto > 100:
+            print(f'[gráficos] frame lento: {gasto:.0f} ms', flush=True)
         self.after(max(5, int(self.ALVO_MS - gasto)), self._atualizar)
 
     def _dec(self, a):
@@ -646,9 +670,12 @@ class JanelaGraficos(tk.Toplevel):
         if janela > 0:
             if mudou_janela:
                 self.ax_p.set_xlim(-janela, 0)
-        else:   # "tudo": o intervalo cresce -> redesenho completo
-            self.ax_p.set_xlim(-max(t_fim, 1.0), 0)
-            completo = True
+        else:   # "tudo": o intervalo cresce -> redesenho completo, mas só 2x/s
+            agora = time.time()
+            if mudou_janela or agora - self._t_xlim_tudo > 0.5:
+                self.ax_p.set_xlim(-max(t_fim, 1.0), 0)
+                self._t_xlim_tudo = agora
+                completo = True
 
         completo |= self._ajustar_y(self.ax_a, (ax_w, ay_w))
         completo |= self._ajustar_y(self.ax_v, (vx, vy, vn, ov))
