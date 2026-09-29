@@ -23,7 +23,8 @@ def generate_launch_description():
     robot_state_publisher = Node(
         package='robot_state_publisher',
         executable='robot_state_publisher',
-        parameters=[{'robot_description': robot_description}]
+        parameters=[{'robot_description': robot_description,
+                     'use_sim_time': True}]
     )
     
     world_file = os.path.join(pkg_share, 'worlds', 'raf4_world.sdf')
@@ -39,7 +40,9 @@ def generate_launch_description():
         arguments=[
             '-topic', 'robot_description',
             '-name', 'raf4',
-            '-z', '0.032'
+            # fundo das rodas/guias em z=-0.0163 -> nasce a 1.7 cm do chão
+            # para não "cair" no arranque (e meter um transitório no IMU)
+            '-z', '0.0165'
         ],
         output='screen'
     )
@@ -62,6 +65,7 @@ def generate_launch_description():
             'publish_tf': False,
             'world_frame': 'enu',
             'fixed_frame': 'odom',
+            'use_sim_time': True,
         }],
         remappings=[
             ('imu/data_raw', 'imu/data_raw'),

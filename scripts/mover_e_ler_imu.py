@@ -30,6 +30,7 @@ except ImportError:      # só os gráficos precisam de numpy
 
 import rclpy
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import qos_profile_sensor_data
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import Imu, MagneticField, JointState
@@ -111,7 +112,7 @@ CONTAGENS_POR_VOLTA = PPR_BASE * REDUCAO_ENGRENAGEM * (4 if ENCODER_QUAD_X4 else
 # Têm de bater certo com o raf4.urdf.xacro (wheel_radius, wheel_separation
 # do plugin DiffDrive) -- se mudares lá, muda aqui também.
 RAIO_RODA = 0.0235       # m
-DISTANCIA_ENTRE_RODAS = 0.166  # m
+DISTANCIA_ENTRE_RODAS = 0.16595  # m (= left_wheel_y - right_wheel_y no xacro)
 
 
 class MoverELerImuNode(Node):
@@ -122,13 +123,18 @@ class MoverELerImuNode(Node):
     """
 
     def __init__(self):
-        super().__init__('mover_e_ler_imu_gui')
+        # use_sim_time: todos os tempos (duração do movimento, dt do IMU)
+        # passam a ser tempo de SIMULAÇÃO, coerentes entre si mesmo com RTF<1.
+        # Precisa do /clock bridgeado (já está no bridge.yaml).
+        super().__init__(
+            'mover_e_ler_imu_gui',
+            parameter_overrides=[Parameter('use_sim_time', Parameter.Type.BOOL, True)])
 
         self._lock = threading.Lock()
         self.vel_linear = 0.0
         self.vel_angular = 0.0
         self._a_andar = False
-        self._parar_em = None  # timestamp (time.time()); None = contínuo
+        self._parar_em = None  # tempo de simulação (s); None = contínuo
 
         self.cmd_pub = self.create_publisher(Twist, 'cmd_vel', 10)
 
@@ -188,10 +194,9 @@ class MoverELerImuNode(Node):
         # x, y, theta (rad) -- pose estimada só com os pulsos dos encoders,
         # tal como o firmware real do robô faria
         self.enc_pose = [0.0, 0.0, 0.0]
+        self._enc_inicializado = False
         self.enc_ticks_esq = 0   # contagem acumulada (inteiro, como um
         self.enc_ticks_dir = 0   # contador de hardware real)
-        self._angulo_anterior_esq = None  # último ângulo contínuo (rad) lido
-        self._angulo_anterior_dir = None  # do joint_states, p/ calcular delta
 
         # Um único timer trata de publicar o cmd_vel repetidamente (a
         # bridge/plugin espera receção contínua) e de verificar se a
@@ -309,14 +314,13 @@ class MoverELerImuNode(Node):
         ang_dir = msg.position[i_dir]
 
         with self._lock:
-            if self._angulo_anterior_esq is None:
+            if self._enc_inicializado is False:
                 # primeira mensagem: só inicializa, não há delta para integrar
-                self._angulo_anterior_esq = ang_esq
-                self._angulo_anterior_dir = ang_dir
                 # sem isto, se a roda já estiver rodada (GUI aberta depois do
                 # robô ter andado), o 1.º delta seria enorme -> "salto" na pose
                 self.enc_ticks_esq = round(ang_esq / (2 * math.pi) * CONTAGENS_POR_VOLTA)
                 self.enc_ticks_dir = round(ang_dir / (2 * math.pi) * CONTAGENS_POR_VOLTA)
+                self._enc_inicializado = True
                 return
 
             # ---- 1) Quantização: ângulo contínuo -> nº de pulsos (inteiro) ----
@@ -328,9 +332,6 @@ class MoverELerImuNode(Node):
             delta_ticks_dir = ticks_dir_novo - self.enc_ticks_dir
             self.enc_ticks_esq = ticks_esq_novo
             self.enc_ticks_dir = ticks_dir_novo
-
-            self._angulo_anterior_esq = ang_esq
-            self._angulo_anterior_dir = ang_dir
 
             if delta_ticks_esq == 0 and delta_ticks_dir == 0:
                 return  # roda não rodou o suficiente para um novo pulso
@@ -405,6 +406,10 @@ class MoverELerImuNode(Node):
                     self.odom_pos, self.odom_yaw_deg,
                     tuple(self.enc_pose), self.enc_ticks_esq, self.enc_ticks_dir)
 
+    def _agora(self):
+        """Tempo (s) do relógio do nó = tempo de simulação (use_sim_time)."""
+        return self.get_clock().now().nanoseconds * 1e-9
+
     def esta_a_andar(self):
         with self._lock:
             return self._a_andar
@@ -417,7 +422,7 @@ class MoverELerImuNode(Node):
             parar_em = self._parar_em
 
         # duração pedida já terminou -> pára sozinho
-        if a_andar and parar_em is not None and time.time() >= parar_em:
+        if a_andar and parar_em is not None and self._agora() >= parar_em:
             a_andar = False
             with self._lock:
                 self._a_andar = False
@@ -434,7 +439,7 @@ class MoverELerImuNode(Node):
             self.vel_linear = vel_linear
             self.vel_angular = vel_angular
             self._a_andar = True
-            self._parar_em = (time.time() + duracao) if duracao > 0 else None
+            self._parar_em = (self._agora() + duracao) if duracao > 0 else None
 
     def parar(self):
         with self._lock:
@@ -448,8 +453,10 @@ class JanelaGraficos(tk.Toplevel):
     """Janela com 3 gráficos EM TEMPO REAL: aceleração, velocidade, posição.
 
     IMU (dead-reckoning) a cheio; odometria do Gazebo a tracejado verde.
-    Comparação em normas (|v| e distância) porque o referencial do IMU
-    (Madgwick + magnetómetro, ENU) não coincide com o do "odom".
+    Comparação em normas (|v| e distância): robusta a diferenças de yaw
+    entre o referencial do IMU (Madgwick + magnetómetro, ENU) e o do "odom"
+    (o robô nasce virado para +X = Este, por isso devem coincidir a menos
+    do erro do magnetómetro/bias simulado).
 
     Eficiência:
       * o eixo X é "tempo relativo a agora" (-janela..0), logo os eixos não

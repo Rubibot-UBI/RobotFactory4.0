@@ -3,7 +3,7 @@
 <package format="3">
   <name>raf4_description</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>Modelo, mundo e launch Gazebo do robô RobotFactory4.0 (diferencial, motores N20 com encoder, IMU BNO055)</description>
   <maintainer email="rafabacano@todo.todo">rafabacano</maintainer>
   <license>TODO: License declaration</license>
 

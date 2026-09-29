@@ -1,26 +1,54 @@
 <?xml version="1.0"?>
 <robot name="raf4" xmlns:xacro="http://www.ros.org/wiki/xacro">
 
-  <!-- ===================== Posição das rodas ===================== -->
+  <!-- ============================================================
+       Convenção ROS (REP-103): +X = frente, +Y = esquerda, +Z = cima.
 
-  <!-- Roda DIREITA -->
-  <xacro:property name="right_wheel_x" value="-0.08316"/>  <!-- frente/trás -->
-  <xacro:property name="right_wheel_y" value="-0.00021"/>  <!-- lateral (negativo = direita) -->
-  <xacro:property name="right_wheel_z" value="0.00720"/>  <!-- altura (subida 3mm face ao valor original -0.00720) -->
+       O STL do chassis foi desenhado com as rodas motrizes em ±X e as
+       rodas-guia (esferas) em ±Y. Para o DiffDrive, a odometria e o IMU
+       ficarem no MESMO referencial, roda-se o chassis 90° em yaw
+       (chassis_yaw) e as rodas motrizes ficam em ±Y, com eixo Y.
+       Como o robô é simétrico, qual das pontas é a "frente" é indiferente.
 
-  <!-- Roda ESQUERDA (mede-a separadamente, não assumas que é igual à direita!) -->
-  <xacro:property name="left_wheel_x" value="0.08279"/>
-  <xacro:property name="left_wheel_y" value="-0.00030"/>
-  <xacro:property name="left_wheel_z" value="0.00720"/>  <!-- altura (subida 3mm face ao valor original -0.00725) -->
+       Medidas abaixo = as do CAD (referencial original do STL), já
+       convertidas: (x', y') = (-y, x).
+       ============================================================ -->
+  <xacro:property name="chassis_yaw" value="${pi/2}"/>
 
-  <!-- Raio e largura da roda: mede-os também no CAD (não são os do Measure
-       que mandaste, são as dimensões da própria roda) -->
+  <!-- ===================== Posição das rodas motrizes ===================== -->
+  <!-- Assume-se que estes valores são o CENTRO da roda (o cavado no chassis
+       vai de x≈50 a x≈116 mm e o seu ponto médio bate com ≈83 mm). -->
+  <xacro:property name="right_wheel_x" value="0.00021"/>
+  <xacro:property name="right_wheel_y" value="-0.08316"/>
+  <xacro:property name="right_wheel_z" value="0.00720"/>
+
+  <xacro:property name="left_wheel_x" value="0.00030"/>
+  <xacro:property name="left_wheel_y" value="0.08279"/>
+  <xacro:property name="left_wheel_z" value="0.00720"/>
+
+  <!-- Distância entre rodas: usada também pelo DiffDrive (não hardcoded) -->
+  <xacro:property name="wheel_separation" value="${left_wheel_y - right_wheel_y}"/>
+
+  <!-- roda.stl (medido na malha): raio 23.5 mm, largura 13 mm, ORIGEM NA FACE
+       (a malha vai de y=-13 a y=0). wheel_visual_shift recentra o visual no
+       joint. Se afinal as posições acima forem a face e não o centro, põe 0. -->
   <xacro:property name="wheel_radius" value="0.0235"/>
   <xacro:property name="wheel_width" value="0.013"/>
-  <xacro:property name="wheel_mass" value="0.05"/>
+  <xacro:property name="wheel_visual_shift" value="${wheel_width/2}"/>
+  <xacro:property name="wheel_mass" value="0.05"/>  <!-- PESA A RODA REAL -->
+
+  <!-- Rodas-guia: esferas perfeitas (raio 12.5 mm) na malha do chassis -->
+  <xacro:property name="caster_radius" value="0.0125"/>
+  <xacro:property name="caster_z" value="-0.00378"/>
+
+  <!-- Massa do robô. 1.0 kg é um PLACEHOLDER: PESA O ROBÔ REAL. A inércia e
+       o centro de massa abaixo vêm da malha (densidade uniforme) e escalam
+       com esta massa. -->
+  <xacro:property name="base_mass" value="1.0"/>
 
   <link name="base_link">
     <visual>
+      <origin xyz="0 0 0" rpy="0 0 ${chassis_yaw}"/>
       <geometry>
         <mesh filename="package://raf4_description/meshes/raf4.stl" scale="0.001 0.001 0.001"/>
       </geometry>
@@ -28,40 +56,75 @@
         <color rgba="0.2 0.2 0.2 1"/>
       </material>
     </visual>
+    <!-- Colisão do corpo = caixa (a malha tem 25k triângulos). O fundo do
+         corpo está a z=-2.8 mm, logo NÃO toca no chão: quem toca são as
+         rodas e as guias. -->
     <collision>
+      <origin xyz="-0.000305 0.00029 0.0663" rpy="0 0 0"/>
       <geometry>
-        <mesh filename="package://raf4_description/meshes/raf4.stl" scale="0.001 0.001 0.001"/>
+        <box size="0.23379 0.23412 0.13817"/>
       </geometry>
     </collision>
     <inertial>
-      <mass value="1.0"/>
-      <inertia ixx="0.01" ixy="0.0" ixz="0.0" iyy="0.01" iyz="0.0" izz="0.01"/>
+      <origin xyz="-0.00035 0.00033 0.0495" rpy="0 0 0"/>
+      <mass value="${base_mass}"/>
+      <inertia ixx="${base_mass * 0.00728}" ixy="0.0" ixz="0.0"
+               iyy="${base_mass * 0.00753}" iyz="0.0"
+               izz="${base_mass * 0.01014}"/>
     </inertial>
   </link>
 
-  <!-- ===================== Macro da roda ===================== -->
-  <xacro:macro name="wheel" params="prefix x y z yaw">
+  <!-- ===================== Rodas-guia (sem atrito) ===================== -->
+  <xacro:macro name="caster" params="name x y">
+    <link name="${name}_link">
+      <collision>
+        <geometry>
+          <sphere radius="${caster_radius}"/>
+        </geometry>
+      </collision>
+    </link>
+    <joint name="${name}_joint" type="fixed">
+      <parent link="base_link"/>
+      <child link="${name}_link"/>
+      <origin xyz="${x} ${y} ${caster_z}" rpy="0 0 0"/>
+    </joint>
+    <!-- esfera "de bola": quase sem atrito, senão trava o robô -->
+    <gazebo reference="${name}_link">
+      <mu1>0.01</mu1>
+      <mu2>0.01</mu2>
+    </gazebo>
+  </xacro:macro>
+
+  <xacro:caster name="caster_front" x="0.08321"  y="0.00035"/>
+  <xacro:caster name="caster_rear"  x="-0.08379" y="0.00035"/>
+
+  <!-- ===================== Macro da roda motriz ===================== -->
+  <!-- visual_yaw/visual_dy: a malha ocupa y∈[-13,0]; a roda direita já
+       aponta para fora (-Y), a esquerda roda-se 180°. -->
+  <xacro:macro name="wheel" params="prefix x y z visual_yaw visual_dy">
     <link name="${prefix}_wheel_link">
       <visual>
-        <origin xyz="0 0 0" rpy="0 0 ${yaw}"/>
+        <origin xyz="0 ${visual_dy} 0" rpy="0 0 ${visual_yaw}"/>
         <geometry>
           <mesh filename="package://raf4_description/meshes/roda.stl" scale="0.001 0.001 0.001"/>
         </geometry>
         <material name="wheel_color">
-          <color rgba="0.05 0.05 0.05 1"/>   <!-- quase preto, tipo borracha -->
+          <color rgba="0.05 0.05 0.05 1"/>
         </material>
       </visual>
       <collision>
-        <!-- Cilindro simples: mais leve/estável para a física do Gazebo
-             do que usar a malha completa como collision -->
-        <origin xyz="0 0 0" rpy="0 1.5708 0"/>
+        <!-- Cilindro com eixo em Y, centrado no joint -->
+        <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
         <geometry>
           <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
         </geometry>
       </collision>
       <inertial>
+        <!-- cilindro maciço com eixo em Y -->
         <mass value="${wheel_mass}"/>
-        <inertia ixx="0.0001" ixy="0.0" ixz="0.0" iyy="0.0001" iyz="0.0" izz="0.0001"/>
+        <inertia ixx="${wheel_mass * (3*wheel_radius*wheel_radius + wheel_width*wheel_width) / 12}" ixy="0.0" ixz="0.0"
+                 iyy="${0.5 * wheel_mass * wheel_radius * wheel_radius}" iyz="0.0"
+                 izz="${wheel_mass * (3*wheel_radius*wheel_radius + wheel_width*wheel_width) / 12}"/>
       </inertial>
     </link>
 
@@ -69,9 +132,8 @@
       <parent link="base_link"/>
       <child link="${prefix}_wheel_link"/>
       <origin xyz="${x} ${y} ${z}" rpy="0 0 0"/>
-      <!-- Eixo de rotação = lateral (Y). Se a roda rodar "torta" no Gazebo,
-           é aqui que tens de mudar. -->
-      <axis xyz="1 0 0"/>
+      <!-- Eixo lateral (Y): rotação positiva das duas rodas => avança em +X -->
+      <axis xyz="0 1 0"/>
     </joint>
 
     <gazebo reference="${prefix}_wheel_link">
@@ -80,10 +142,13 @@
     </gazebo>
   </xacro:macro>
 
-  <xacro:wheel prefix="right" x="${right_wheel_x}" y="${right_wheel_y}" z="${right_wheel_z}" yaw="-1.5708"/>
-  <xacro:wheel prefix="left"  x="${left_wheel_x}"  y="${left_wheel_y}"  z="${left_wheel_z}"  yaw="1.5708"/>
+  <xacro:wheel prefix="right" x="${right_wheel_x}" y="${right_wheel_y}" z="${right_wheel_z}"
+               visual_yaw="0" visual_dy="${wheel_visual_shift}"/>
+  <xacro:wheel prefix="left"  x="${left_wheel_x}"  y="${left_wheel_y}"  z="${left_wheel_z}"
+               visual_yaw="${pi}" visual_dy="${-wheel_visual_shift}"/>
 
-  <!-- Link do IMU (sem geometria visual, é só um referencial) -->
+  <!-- Link do IMU (sem geometria visual, é só um referencial). Mesmo
+       referencial que base_link: X à frente, Y esquerda, Z cima. -->
   <link name="imu_link"/>
 
   <joint name="imu_joint" type="fixed">
@@ -93,85 +158,87 @@
   </joint>
 
   <!-- ============================================================
-       Ruído calibrado com o datasheet oficial da Bosch
-       (BST-BNO055-DS000-16, rev 1.6, secção 1.2 "Electrical and
-       physical characteristics, measurement performance").
-
-       "stddev"      = ruído branco por amostra (densidade de ruído
-                        do datasheet × raiz da largura de banda usada
-                        em modo fusão)
-       "bias_stddev" = desvio fixo por arranque (offset/zero-offset
-                        do datasheet) — simula o facto de cada BNO055
-                        físico ter um pequeno bias próprio que não
-                        muda durante a sessão, só entre power-ons
+       Ruído calibrado com o datasheet oficial da Bosch (BNO055,
+       secção 1.2). "stddev" = ruído branco por amostra; "bias_stddev" =
+       offset fixo por arranque (cada BNO055 tem o seu, muda só entre
+       power-ons).
   ==================================================================== -->
   <gazebo reference="imu_link">
     <sensor name="imu_sensor" type="imu">
       <always_on>true</always_on>
-      <update_rate>100</update_rate>  <!-- accel/gyro no BNO055 saem a 100Hz em modo NDOF -->
+      <update_rate>100</update_rate>  <!-- accel/gyro a 100 Hz em modo NDOF -->
       <topic>imu/data</topic>
+      <gz_frame_id>imu_link</gz_frame_id>
       <imu>
         <angular_velocity>
-          <!-- Giroscópio, BW=32Hz (config default do BNO055 em modo fusão).
-               Densidade de ruído do datasheet: 0.014 °/s/√Hz
-               -> stddev ≈ 0.014 * sqrt(32) ≈ 0.079°/s ≈ 0.0014 rad/s
-               Zero-rate offset (bias): típico ±1°/s ≈ 0.0175 rad/s -->
+          <!-- Gyro BW=32Hz: 0.014 °/s/√Hz * √32 ≈ 0.079°/s = 0.0014 rad/s.
+               Zero-rate offset típico ±1°/s = 0.0175 rad/s (datasheet). -->
           <x><noise type="gaussian"><mean>0.0</mean><stddev>0.0014</stddev><bias_mean>0.0</bias_mean><bias_stddev>0.0175</bias_stddev></noise></x>
           <y><noise type="gaussian"><mean>0.0</mean><stddev>0.0014</stddev><bias_mean>0.0</bias_mean><bias_stddev>0.0175</bias_stddev></noise></y>
           <z><noise type="gaussian"><mean>0.0</mean><stddev>0.0014</stddev><bias_mean>0.0</bias_mean><bias_stddev>0.0175</bias_stddev></noise></z>
         </angular_velocity>
         <linear_acceleration>
-          <!-- Acelerómetro, BW=62.5Hz (config default do BNO055 em modo fusão).
-               Densidade de ruído do datasheet: 150 µg/√Hz
-               -> stddev ≈ 150e-6 * sqrt(62.5) * 9.81 ≈ 0.0116 m/s²
-               Zero-g offset (bias) residual após auto-calibração: ~0.03 m/s² -->
-          <x><noise type="gaussian"><mean>0.0</mean><stddev>0.0116</stddev><bias_mean>0.0</bias_mean><bias_stddev>0.03</bias_stddev></noise></x>
-          <y><noise type="gaussian"><mean>0.0</mean><stddev>0.0116</stddev><bias_mean>0.0</bias_mean><bias_stddev>0.03</bias_stddev></noise></y>
-          <z><noise type="gaussian"><mean>0.0</mean><stddev>0.0116</stddev><bias_mean>0.0</bias_mean><bias_stddev>0.03</bias_stddev></noise></z>
+          <!-- Accel BW=62.5Hz: 150 µg/√Hz * √62.5 * 9.81 ≈ 0.0116 m/s².
+               Zero-g offset do datasheet: ±80 mg típico (±0.78 m/s²), ±150 mg
+               máx., em bruto. Em fusão há autocalibração mas o datasheet não
+               dá o resíduo: 0.1 m/s² é uma SUPOSIÇÃO (sobe para ser mais
+               pessimista). -->
+          <x><noise type="gaussian"><mean>0.0</mean><stddev>0.0116</stddev><bias_mean>0.0</bias_mean><bias_stddev>0.1</bias_stddev></noise></x>
+          <y><noise type="gaussian"><mean>0.0</mean><stddev>0.0116</stddev><bias_mean>0.0</bias_mean><bias_stddev>0.1</bias_stddev></noise></y>
+          <z><noise type="gaussian"><mean>0.0</mean><stddev>0.0116</stddev><bias_mean>0.0</bias_mean><bias_stddev>0.1</bias_stddev></noise></z>
         </linear_acceleration>
       </imu>
     </sensor>
 
-    <!-- Magnetómetro: junto com o imu_sensor acima, dá os 9 eixos do BNO055
-         (acelerómetro + giroscópio + magnetómetro).
-         No BNO055 real, em modo fusão (NDOF), o magnetómetro só é lido a
-         20Hz (é o sensor mais lento dos três) -> update_rate diferente do
-         imu_sensor acima, de propósito.
-         Ruído "Regular preset" do datasheet: 0.6 µT rms = 0.0000006 T -->
+    <!-- Magnetómetro a 20 Hz em NDOF. Ruído "Regular preset": 0.6 µT.
+         Zero-B offset: ±40 µT em bruto, ±2 µT após calibração em fusão
+         (datasheet) -> bias_stddev = 2 µT. -->
     <sensor name="mag_sensor" type="magnetometer">
       <always_on>true</always_on>
       <update_rate>20</update_rate>
       <topic>imu/mag</topic>
+      <gz_frame_id>imu_link</gz_frame_id>
       <magnetometer>
-        <x><noise type="gaussian"><mean>0.0</mean><stddev>0.0000006</stddev></noise></x>
-        <y><noise type="gaussian"><mean>0.0</mean><stddev>0.0000006</stddev></noise></y>
-        <z><noise type="gaussian"><mean>0.0</mean><stddev>0.0000006</stddev></noise></z>
+        <x><noise type="gaussian"><mean>0.0</mean><stddev>0.0000006</stddev><bias_mean>0.0</bias_mean><bias_stddev>0.000002</bias_stddev></noise></x>
+        <y><noise type="gaussian"><mean>0.0</mean><stddev>0.0000006</stddev><bias_mean>0.0</bias_mean><bias_stddev>0.000002</bias_stddev></noise></y>
+        <z><noise type="gaussian"><mean>0.0</mean><stddev>0.0000006</stddev><bias_mean>0.0</bias_mean><bias_stddev>0.000002</bias_stddev></noise></z>
       </magnetometer>
     </sensor>
   </gazebo>
 
   <!-- ===================== Controlador de tração (DiffDrive) ===================== -->
+  <!-- Limites (motor N20 12V 200rpm, roda 23.5 mm):
+       * velocidade teórica sem carga = 200 rpm * 2π/60 * 0.0235 = 0.49 m/s
+         -> 0.40 m/s em carga.
+       * o gz-sim DiffDrive não limita binário; limita-se a aceleração
+         (estimativa, ajusta ao robô: binário de bloqueio 1.2 kg·cm/motor
+         = 10 N no total, mas o atrito das rodas limita bastante mais). -->
   <gazebo>
     <plugin filename="gz-sim-diff-drive-system" name="gz::sim::systems::DiffDrive">
       <left_joint>left_wheel_joint</left_joint>
       <right_joint>right_wheel_joint</right_joint>
-      <wheel_separation>0.166</wheel_separation>
+      <wheel_separation>${wheel_separation}</wheel_separation>
       <wheel_radius>${wheel_radius}</wheel_radius>
       <odom_publish_frequency>50</odom_publish_frequency>
       <topic>cmd_vel</topic>
       <odom_topic>odom</odom_topic>
+      <tf_topic>tf</tf_topic>
       <frame_id>odom</frame_id>
       <child_frame_id>base_link</child_frame_id>
+      <min_linear_velocity>-0.40</min_linear_velocity>
+      <max_linear_velocity>0.40</max_linear_velocity>
+      <min_angular_velocity>-4.0</min_angular_velocity>
+      <max_angular_velocity>4.0</max_angular_velocity>
+      <min_linear_acceleration>-1.5</min_linear_acceleration>
+      <max_linear_acceleration>1.5</max_linear_acceleration>
+      <min_angular_acceleration>-10.0</min_angular_acceleration>
+      <max_angular_acceleration>10.0</max_angular_acceleration>
     </plugin>
   </gazebo>
 
-  <!-- Publica o ângulo "verdadeiro" (contínuo, sem quantização) de cada
-       roda. O DiffDrive acima já dá odometria "perfeita" via física; isto
-       aqui é o que dá para simular os encoders REAIS dos motores N20
-       (Hall, 7 PPR base x150 redução = 1050 PPR no veio de saída) — a
-       quantização/contagem de pulsos é feita do lado do Python, a partir
-       deste ângulo contínuo, tal como a firmware de um robô real faria a
-       partir dos pulsos A/B do encoder. -->
+  <!-- Ângulo "verdadeiro" (contínuo) de cada roda. O script Python quantiza-o
+       para simular os encoders dos motores N20 (Hall AB, 7 PPR x 150 = 1050
+       PPR por canal; x4 em quadratura = 4200 contagens/volta). -->
   <gazebo>
     <plugin filename="gz-sim-joint-state-publisher-system" name="gz::sim::systems::JointStatePublisher">
       <topic>joint_states</topic>
