@@ -92,35 +92,60 @@
     <origin xyz="0 0 0.05" rpy="0 0 0"/>
   </joint>
 
+  <!-- ============================================================
+       Ruído calibrado com o datasheet oficial da Bosch
+       (BST-BNO055-DS000-16, rev 1.6, secção 1.2 "Electrical and
+       physical characteristics, measurement performance").
+
+       "stddev"      = ruído branco por amostra (densidade de ruído
+                        do datasheet × raiz da largura de banda usada
+                        em modo fusão)
+       "bias_stddev" = desvio fixo por arranque (offset/zero-offset
+                        do datasheet) — simula o facto de cada BNO055
+                        físico ter um pequeno bias próprio que não
+                        muda durante a sessão, só entre power-ons
+  ==================================================================== -->
   <gazebo reference="imu_link">
     <sensor name="imu_sensor" type="imu">
       <always_on>true</always_on>
-      <update_rate>100</update_rate>
+      <update_rate>100</update_rate>  <!-- accel/gyro no BNO055 saem a 100Hz em modo NDOF -->
       <topic>imu/data</topic>
       <imu>
         <angular_velocity>
-          <x><noise type="gaussian"><mean>0.0</mean><stddev>0.0003</stddev></noise></x>
-          <y><noise type="gaussian"><mean>0.0</mean><stddev>0.0003</stddev></noise></y>
-          <z><noise type="gaussian"><mean>0.0</mean><stddev>0.0003</stddev></noise></z>
+          <!-- Giroscópio, BW=32Hz (config default do BNO055 em modo fusão).
+               Densidade de ruído do datasheet: 0.014 °/s/√Hz
+               -> stddev ≈ 0.014 * sqrt(32) ≈ 0.079°/s ≈ 0.0014 rad/s
+               Zero-rate offset (bias): típico ±1°/s ≈ 0.0175 rad/s -->
+          <x><noise type="gaussian"><mean>0.0</mean><stddev>0.0014</stddev><bias_mean>0.0</bias_mean><bias_stddev>0.0175</bias_stddev></noise></x>
+          <y><noise type="gaussian"><mean>0.0</mean><stddev>0.0014</stddev><bias_mean>0.0</bias_mean><bias_stddev>0.0175</bias_stddev></noise></y>
+          <z><noise type="gaussian"><mean>0.0</mean><stddev>0.0014</stddev><bias_mean>0.0</bias_mean><bias_stddev>0.0175</bias_stddev></noise></z>
         </angular_velocity>
         <linear_acceleration>
-          <x><noise type="gaussian"><mean>0.0</mean><stddev>0.017</stddev></noise></x>
-          <y><noise type="gaussian"><mean>0.0</mean><stddev>0.017</stddev></noise></y>
-          <z><noise type="gaussian"><mean>0.0</mean><stddev>0.017</stddev></noise></z>
+          <!-- Acelerómetro, BW=62.5Hz (config default do BNO055 em modo fusão).
+               Densidade de ruído do datasheet: 150 µg/√Hz
+               -> stddev ≈ 150e-6 * sqrt(62.5) * 9.81 ≈ 0.0116 m/s²
+               Zero-g offset (bias) residual após auto-calibração: ~0.03 m/s² -->
+          <x><noise type="gaussian"><mean>0.0</mean><stddev>0.0116</stddev><bias_mean>0.0</bias_mean><bias_stddev>0.03</bias_stddev></noise></x>
+          <y><noise type="gaussian"><mean>0.0</mean><stddev>0.0116</stddev><bias_mean>0.0</bias_mean><bias_stddev>0.03</bias_stddev></noise></y>
+          <z><noise type="gaussian"><mean>0.0</mean><stddev>0.0116</stddev><bias_mean>0.0</bias_mean><bias_stddev>0.03</bias_stddev></noise></z>
         </linear_acceleration>
       </imu>
     </sensor>
 
     <!-- Magnetómetro: junto com o imu_sensor acima, dá os 9 eixos do BNO055
-         (acelerómetro + giroscópio + magnetómetro) -->
+         (acelerómetro + giroscópio + magnetómetro).
+         No BNO055 real, em modo fusão (NDOF), o magnetómetro só é lido a
+         20Hz (é o sensor mais lento dos três) -> update_rate diferente do
+         imu_sensor acima, de propósito.
+         Ruído "Regular preset" do datasheet: 0.6 µT rms = 0.0000006 T -->
     <sensor name="mag_sensor" type="magnetometer">
       <always_on>true</always_on>
-      <update_rate>100</update_rate>
+      <update_rate>20</update_rate>
       <topic>imu/mag</topic>
       <magnetometer>
-        <x><noise type="gaussian"><mean>0.0</mean><stddev>0.0000008</stddev></noise></x>
-        <y><noise type="gaussian"><mean>0.0</mean><stddev>0.0000008</stddev></noise></y>
-        <z><noise type="gaussian"><mean>0.0</mean><stddev>0.0000008</stddev></noise></z>
+        <x><noise type="gaussian"><mean>0.0</mean><stddev>0.0000006</stddev></noise></x>
+        <y><noise type="gaussian"><mean>0.0</mean><stddev>0.0000006</stddev></noise></y>
+        <z><noise type="gaussian"><mean>0.0</mean><stddev>0.0000006</stddev></noise></z>
       </magnetometer>
     </sensor>
   </gazebo>
@@ -137,6 +162,21 @@
       <odom_topic>odom</odom_topic>
       <frame_id>odom</frame_id>
       <child_frame_id>base_link</child_frame_id>
+    </plugin>
+  </gazebo>
+
+  <!-- Publica o ângulo "verdadeiro" (contínuo, sem quantização) de cada
+       roda. O DiffDrive acima já dá odometria "perfeita" via física; isto
+       aqui é o que dá para simular os encoders REAIS dos motores N20
+       (Hall, 7 PPR base x150 redução = 1050 PPR no veio de saída) — a
+       quantização/contagem de pulsos é feita do lado do Python, a partir
+       deste ângulo contínuo, tal como a firmware de um robô real faria a
+       partir dos pulsos A/B do encoder. -->
+  <gazebo>
+    <plugin filename="gz-sim-joint-state-publisher-system" name="gz::sim::systems::JointStatePublisher">
+      <topic>joint_states</topic>
+      <joint_name>left_wheel_joint</joint_name>
+      <joint_name>right_wheel_joint</joint_name>
     </plugin>
   </gazebo>
 
