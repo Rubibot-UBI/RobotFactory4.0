@@ -6,10 +6,14 @@ gyro, magnetómetro e orientação fundida) a atualizar em tempo real.
 Uso (depois de dar source ao ROS 2 e ter o gazebo.launch.py já a correr
 noutro terminal):
 
-    python3 mover_e_ler_imu_gui.py
+    python3 mover_e_ler_imu.py
 
 Se o "import tkinter" falhar, instala com:
     sudo apt install python3-tk
+
+O botão "Gráficos" abre uma janela com aceleração, velocidade e posição
+(IMU por dupla integração vs odometria do Gazebo). Precisa de matplotlib:
+    sudo apt install python3-matplotlib      (ou: pip install matplotlib)
 """
 
 import sys
@@ -18,6 +22,11 @@ import math
 import threading
 import tkinter as tk
 from tkinter import ttk
+
+try:
+    import numpy as np
+except ImportError:      # só os gráficos precisam de numpy
+    np = None
 
 import rclpy
 from rclpy.node import Node
@@ -159,6 +168,18 @@ class MoverELerImuNode(Node):
         self.imu_pos = [0.0, 0.0, 0.0]
         self._t_imu_anterior = None  # timestamp (segundos, float) da última msg
 
+        # ---- Histórico para os gráficos (tempo em s desde o início/reset) ----
+        # Buffers em anel de numpy (escrita O(1), leitura da cauda sem loops
+        # Python). IMU: [t, ax_w, ay_w, vx, vy, px, py]  (aceleração no mundo,
+        # sem gravidade). Odom: [t, |v|, distância à origem]  (referência).
+        if np is not None:
+            self._buf_imu = np.zeros((60000, 7))    # ~10 min a 100 Hz
+            self._buf_odom = np.zeros((30000, 3))   # ~10 min a 50 Hz
+        self._n_imu = 0    # nº total de amostras escritas (também serve de "versão")
+        self._n_odom = 0
+        self._hist_t0 = None
+        self._odom_p0 = None
+
         # ---- Odometria das rodas (referência, "perfeita" via física) ----
         self.odom_pos = (0.0, 0.0)
         self.odom_yaw_deg = 0.0
@@ -211,6 +232,8 @@ class MoverELerImuNode(Node):
 
             if self._t_imu_anterior is None:
                 self._t_imu_anterior = t_msg
+                if self._hist_t0 is None:
+                    self._hist_t0 = t_msg
                 return
             dt = t_msg - self._t_imu_anterior
             self._t_imu_anterior = t_msg
@@ -243,15 +266,35 @@ class MoverELerImuNode(Node):
             self.imu_pos[1] += self.imu_vel[1] * dt
             self.imu_pos[2] += self.imu_vel[2] * dt
 
+            if self._hist_t0 is None:
+                self._hist_t0 = t_msg
+            if np is not None:
+                self._buf_imu[self._n_imu % len(self._buf_imu)] = (
+                    t_msg - self._hist_t0, ax_w, ay_w,
+                    self.imu_vel[0], self.imu_vel[1],
+                    self.imu_pos[0], self.imu_pos[1])
+                self._n_imu += 1
+
     def odom_callback(self, msg: Odometry):
-        qz = msg.pose.pose.orientation.z
-        qw = msg.pose.pose.orientation.w
-        # yaw a partir de um quaternion "plano" (só rotação em Z, é o caso
-        # da odometria de um robô diferencial) -> fórmula simplificada
-        yaw = math.atan2(2.0 * qw * qz, 1.0 - 2.0 * qz * qz)
+        o = msg.pose.pose.orientation
+        yaw = math.atan2(2.0 * (o.w * o.z + o.x * o.y),
+                         1.0 - 2.0 * (o.y * o.y + o.z * o.z))
+        px, py = msg.pose.pose.position.x, msg.pose.pose.position.y
+        t_msg = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        vel = math.hypot(msg.twist.twist.linear.x, msg.twist.twist.linear.y)
         with self._lock:
-            self.odom_pos = (msg.pose.pose.position.x, msg.pose.pose.position.y)
+            self.odom_pos = (px, py)
             self.odom_yaw_deg = math.degrees(yaw) % 360.0
+            # histórico para os gráficos (referência)
+            if self._odom_p0 is None:
+                self._odom_p0 = (px, py)
+            if self._hist_t0 is None:
+                self._hist_t0 = t_msg
+            if np is not None:
+                self._buf_odom[self._n_odom % len(self._buf_odom)] = (
+                    t_msg - self._hist_t0, vel,
+                    math.hypot(px - self._odom_p0[0], py - self._odom_p0[1]))
+                self._n_odom += 1
 
     def joint_callback(self, msg: JointState):
         """Simula os pulsos reais do encoder Hall dos motores N20 e
@@ -270,6 +313,10 @@ class MoverELerImuNode(Node):
                 # primeira mensagem: só inicializa, não há delta para integrar
                 self._angulo_anterior_esq = ang_esq
                 self._angulo_anterior_dir = ang_dir
+                # sem isto, se a roda já estiver rodada (GUI aberta depois do
+                # robô ter andado), o 1.º delta seria enorme -> "salto" na pose
+                self.enc_ticks_esq = round(ang_esq / (2 * math.pi) * CONTAGENS_POR_VOLTA)
+                self.enc_ticks_dir = round(ang_dir / (2 * math.pi) * CONTAGENS_POR_VOLTA)
                 return
 
             # ---- 1) Quantização: ângulo contínuo -> nº de pulsos (inteiro) ----
@@ -312,6 +359,42 @@ class MoverELerImuNode(Node):
             self.imu_vel = [0.0, 0.0, 0.0]
             self.imu_pos = [0.0, 0.0, 0.0]
             self._t_imu_anterior = None
+            self._n_imu = 0
+            self._n_odom = 0
+            self._hist_t0 = None
+            self._odom_p0 = None
+
+    @staticmethod
+    def _cauda(buf, n, t_min):
+        """Linhas do buffer em anel com t >= t_min, por ordem temporal.
+        Só copia a cauda necessária (dobra o bloco até cobrir a janela)."""
+        cap = len(buf)
+        total = min(n, cap)
+        if total == 0:
+            return buf[:0]
+        m = min(total, 512)
+        while True:
+            bloco = buf[np.arange(n - m, n) % cap]
+            if m >= total or bloco[0, 0] < t_min:
+                break
+            m = min(total, m * 2)
+        return bloco[bloco[:, 0] >= t_min] if bloco[0, 0] < t_min else bloco
+
+    def versao_historico(self):
+        """Muda sempre que chega uma amostra nova (evita redesenhos inúteis)."""
+        return self._n_imu + self._n_odom
+
+    def get_historico(self, janela=30.0):
+        """(imu[k,7], odom[k,3], t_fim) só com os últimos `janela` s (0 = tudo)."""
+        with self._lock:
+            t_fim = 0.0
+            if self._n_imu:
+                t_fim = max(t_fim, self._buf_imu[(self._n_imu - 1) % len(self._buf_imu), 0])
+            if self._n_odom:
+                t_fim = max(t_fim, self._buf_odom[(self._n_odom - 1) % len(self._buf_odom), 0])
+            t_min = (t_fim - janela) if janela > 0 else -1.0
+            return (self._cauda(self._buf_imu, self._n_imu, t_min),
+                    self._cauda(self._buf_odom, self._n_odom, t_min), t_fim)
 
     def get_leituras(self):
         """Chamado pela GUI: devolve uma cópia consistente das leituras."""
@@ -361,12 +444,233 @@ class MoverELerImuNode(Node):
             self._parar_em = None
 
 
+class JanelaGraficos(tk.Toplevel):
+    """Janela com 3 gráficos EM TEMPO REAL: aceleração, velocidade, posição.
+
+    IMU (dead-reckoning) a cheio; odometria do Gazebo a tracejado verde.
+    Comparação em normas (|v| e distância) porque o referencial do IMU
+    (Madgwick + magnetómetro, ENU) não coincide com o do "odom".
+
+    Eficiência:
+      * o eixo X é "tempo relativo a agora" (-janela..0), logo os eixos não
+        mudam entre frames e só as linhas são redesenhadas (blitting);
+      * o eixo Y só muda quando os dados saem dele (ou sobra muito espaço),
+        e só então há redesenho completo;
+      * não se redesenha se não chegaram amostras novas;
+      * buffers numpy, só a cauda visível é lida, decimação a MAX_PONTOS.
+    """
+
+    ALVO_MS = 40          # ~25 fps no máximo
+    MAX_PONTOS = 800      # por linha; acima disto faz-se decimação
+
+    def __init__(self, master, node: MoverELerImuNode):
+        if np is None:
+            raise ImportError('numpy')
+        super().__init__(master)
+        self.node = node
+        self.title('Gráficos em tempo real — aceleração, velocidade e posição')
+        self.geometry('900x800')
+        self._ativa = True
+        self._pausado = False
+        self._fundo = None            # fundo em cache para o blitting
+        self._versao = -1
+        self._janela_ant = None
+        self._ylim_t = {}             # última alteração de cada eixo Y
+
+        import matplotlib
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+        barra = ttk.Frame(self)
+        barra.pack(fill='x', padx=8, pady=4)
+        ttk.Label(barra, text='Janela (s, 0 = tudo):').pack(side='left')
+        self.entry_janela = ttk.Entry(barra, width=6)
+        self.entry_janela.insert(0, '30')
+        self.entry_janela.pack(side='left', padx=4)
+        self.btn_pausa = ttk.Button(barra, text='⏸ Pausar', command=self._toggle_pausa)
+        self.btn_pausa.pack(side='left', padx=4)
+        ttk.Button(barra, text='↺ Reset (IMU + gráficos)',
+                   command=self.node.reset_odometria_imu).pack(side='left', padx=4)
+        self.var_info = tk.StringVar(value='à espera de dados do IMU…')
+        ttk.Label(barra, textvariable=self.var_info, font=('Courier', 9),
+                  foreground='#227722').pack(side='left', padx=10)
+
+        self.fig = Figure(figsize=(9, 7.5), dpi=100)
+        self.ax_a, self.ax_v, self.ax_p = self.fig.subplots(3, 1, sharex=True)
+        self.fig.subplots_adjust(left=0.09, right=0.98, top=0.97, bottom=0.07, hspace=0.12)
+
+        def linha(ax, **kw):   # animated=True -> só desenhada no blit
+            l, = ax.plot([], [], animated=True, **kw)
+            return l
+        L = self.linhas = {}
+        L['ax'] = linha(self.ax_a, color='#d62728', lw=1, label='a$_x$ (mundo)')
+        L['ay'] = linha(self.ax_a, color='#1f77b4', lw=1, label='a$_y$ (mundo)')
+        self.ax_a.set_ylabel('Aceleração (m/s²)')
+
+        L['vx'] = linha(self.ax_v, color='#d62728', lw=1, alpha=.6, label='v$_x$')
+        L['vy'] = linha(self.ax_v, color='#1f77b4', lw=1, alpha=.6, label='v$_y$')
+        L['vn'] = linha(self.ax_v, color='k', lw=2, label='|v| IMU')
+        L['ov'] = linha(self.ax_v, color='#2ca02c', lw=2, ls='--', label='|v| odom (ref.)')
+        self.ax_v.set_ylabel('Velocidade (m/s)')
+
+        L['px'] = linha(self.ax_p, color='#d62728', lw=1, alpha=.6, label='x')
+        L['py'] = linha(self.ax_p, color='#1f77b4', lw=1, alpha=.6, label='y')
+        L['pn'] = linha(self.ax_p, color='k', lw=2, label='distância IMU')
+        L['od'] = linha(self.ax_p, color='#2ca02c', lw=2, ls='--', label='distância odom (ref.)')
+        self.ax_p.set_ylabel('Posição (m)')
+        self.ax_p.set_xlabel('Tempo (s)  —  0 = agora')
+
+        for ax in (self.ax_a, self.ax_v, self.ax_p):
+            ax.grid(alpha=.3)
+            ax.legend(loc='upper left', fontsize=8, ncol=4)
+            ax.axhline(0, color='gray', lw=.5)
+            ax.set_ylim(-0.05, 0.05)
+        self.ax_p.set_xlim(-30, 0)
+
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self)
+        self.canvas.get_tk_widget().pack(fill='both', expand=True)
+        # sempre que há um desenho completo (resize, mudança de eixos...),
+        # guarda o fundo e desenha por cima as linhas animadas
+        self.canvas.mpl_connect('draw_event', self._on_draw)
+
+        self._t_taxa = time.time()
+        self._n_taxa = 0
+        self._fps = 0.0
+
+        self.protocol('WM_DELETE_WINDOW', self._fechar)
+        self.canvas.draw()
+        self._atualizar()
+
+    # ---------- blitting ----------
+    def _on_draw(self, _evento):
+        self._fundo = self.canvas.copy_from_bbox(self.fig.bbox)
+        for l in self.linhas.values():
+            self.fig.draw_artist(l)
+
+    def _blit(self):
+        if self._fundo is None:
+            self.canvas.draw()
+            return
+        self.canvas.restore_region(self._fundo)
+        for l in self.linhas.values():
+            l.axes.draw_artist(l)
+        self.canvas.blit(self.fig.bbox)
+
+    def _toggle_pausa(self):
+        self._pausado = not self._pausado
+        self.btn_pausa.config(text='▶ Continuar' if self._pausado else '⏸ Pausar')
+
+    def _fechar(self):
+        self._ativa = False
+        self.destroy()
+
+    # ---------- eixo Y com histerese ----------
+    def _ajustar_y(self, ax, arrays, min_span=0.05):
+        """True se mudou os limites (=> precisa de redesenho completo)."""
+        lo = hi = 0.0
+        for a in arrays:
+            if len(a):
+                lo = min(lo, float(a.min())); hi = max(hi, float(a.max()))
+        span = max(hi - lo, min_span)
+        m = span * 0.12
+        novo = (lo - m, lo + span + m)
+        atual = ax.get_ylim()
+        agora = time.time()
+        sai = novo[0] < atual[0] or novo[1] > atual[1]
+        sobra = (atual[1] - atual[0]) > 3.0 * (novo[1] - novo[0]) and \
+            agora - self._ylim_t.get(ax, 0.0) > 2.0
+        if sai or sobra:
+            pad = span * 0.25 if sai else span * 0.12   # folga extra ao expandir
+            ax.set_ylim(lo - pad, lo + span + pad)
+            self._ylim_t[ax] = agora
+            return True
+        return False
+
+    # ---------- ciclo de atualização ----------
+    def _atualizar(self):
+        if not self._ativa:
+            return
+        t_ini = time.perf_counter()
+        try:
+            janela = float(self.entry_janela.get())
+        except ValueError:
+            janela = 30.0
+        versao = self.node.versao_historico()
+        mudou_janela = janela != self._janela_ant
+        # sem amostras novas (ou em pausa) não há nada a fazer
+        if not self._pausado and (versao != self._versao or mudou_janela):
+            self._versao = versao
+            self._janela_ant = janela
+            self._desenhar(janela, mudou_janela)
+        gasto = (time.perf_counter() - t_ini) * 1000.0
+        self.after(max(5, int(self.ALVO_MS - gasto)), self._atualizar)
+
+    def _dec(self, a):
+        n = len(a)
+        return a if n <= self.MAX_PONTOS else a[::n // self.MAX_PONTOS + 1]
+
+    def _desenhar(self, janela, mudou_janela):
+        imu, odom, t_fim = self.node.get_historico(janela)
+        L = self.linhas
+        completo = mudou_janela
+
+        if len(imu):
+            imu = self._dec(imu)
+            t = imu[:, 0] - t_fim                    # tempo relativo a "agora"
+            ax_w, ay_w = imu[:, 1], imu[:, 2]
+            vx, vy = imu[:, 3], imu[:, 4]
+            px, py = imu[:, 5], imu[:, 6]
+            vn, pn = np.hypot(vx, vy), np.hypot(px, py)
+            L['ax'].set_data(t, ax_w); L['ay'].set_data(t, ay_w)
+            L['vx'].set_data(t, vx); L['vy'].set_data(t, vy); L['vn'].set_data(t, vn)
+            L['px'].set_data(t, px); L['py'].set_data(t, py); L['pn'].set_data(t, pn)
+        else:
+            ax_w = ay_w = vx = vy = vn = px = py = pn = np.zeros(0)
+
+        if len(odom):
+            odom = self._dec(odom)
+            to = odom[:, 0] - t_fim
+            ov, od = odom[:, 1], odom[:, 2]
+            L['ov'].set_data(to, ov); L['od'].set_data(to, od)
+        else:
+            ov = od = np.zeros(0)
+
+        # eixo X fixo (só muda se o utilizador mudar a janela)
+        if janela > 0:
+            if mudou_janela:
+                self.ax_p.set_xlim(-janela, 0)
+        else:   # "tudo": o intervalo cresce -> redesenho completo
+            self.ax_p.set_xlim(-max(t_fim, 1.0), 0)
+            completo = True
+
+        completo |= self._ajustar_y(self.ax_a, (ax_w, ay_w))
+        completo |= self._ajustar_y(self.ax_v, (vx, vy, vn, ov))
+        completo |= self._ajustar_y(self.ax_p, (px, py, pn, od))
+
+        if completo:
+            self.canvas.draw()      # redesenho completo (dispara _on_draw)
+        else:
+            self._blit()            # rápido: só as linhas
+
+        # indicador de vida (taxa real de redesenho), atualizado 1x/s
+        self._n_taxa += 1
+        agora = time.time()
+        if agora - self._t_taxa >= 1.0:
+            self._fps = self._n_taxa / (agora - self._t_taxa)
+            self._n_taxa = 0
+            self._t_taxa = agora
+            if len(imu):
+                self.var_info.set(f'●  t={t_fim:6.1f}s   {self._fps:.0f} fps')
+            else:
+                self.var_info.set('à espera de dados do IMU… (o gazebo.launch.py está a correr?)')
+
+
 class App(tk.Tk):
     def __init__(self, node: MoverELerImuNode):
         super().__init__()
         self.node = node
         self.title('Mover e Ler IMU — RobotFactory4.0')
-        self.geometry('480x760')
+        self.geometry('480x800')
         self.resizable(False, False)
 
         self._construir_widgets()
@@ -408,9 +712,14 @@ class App(tk.Tk):
         )
         self.btn_reset_imu.pack(side='left', padx=4)
 
+        self.btn_graficos = ttk.Button(
+            frame_ctrl, text='📈 Gráficos (a, v, pos)', command=self._on_graficos
+        )
+        self.btn_graficos.grid(row=4, column=0, columnspan=2, pady=2)
+
         self.status_var = tk.StringVar(value='Parado')
         ttk.Label(frame_ctrl, textvariable=self.status_var, foreground='blue').grid(
-            row=4, column=0, columnspan=2, **pad
+            row=5, column=0, columnspan=2, **pad
         )
 
         # --- Leituras do IMU ---
@@ -485,6 +794,20 @@ class App(tk.Tk):
 
     def _on_reset_imu(self):
         self.node.reset_odometria_imu()
+
+    def _on_graficos(self):
+        # uma só janela; se já existir, traz para a frente
+        if getattr(self, 'janela_graficos', None) is not None:
+            try:
+                if self.janela_graficos.winfo_exists() and self.janela_graficos._ativa:
+                    self.janela_graficos.lift()
+                    return
+            except tk.TclError:
+                pass
+        try:
+            self.janela_graficos = JanelaGraficos(self, self.node)
+        except ImportError:
+            self.status_var.set('Falta o matplotlib: sudo apt install python3-matplotlib')
 
     def _atualizar_leituras(self):
         (accel, gyro, mag, orient,
